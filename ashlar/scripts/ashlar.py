@@ -112,8 +112,8 @@ def main(argv=sys.argv):
     )
     
     parser.add_argument(
-    '--auto-sigma', default=True, action='store_true',
-    help='Automatically find the best filter sigma using Marr-Hildreth detection'
+        '--auto-sigma', default=True, action='store_true',
+        help='Automatically find the best filter sigma using Marr-Hildreth detection'
     )
     
     parser.add_argument(
