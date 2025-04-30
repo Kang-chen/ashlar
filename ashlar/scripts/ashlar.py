@@ -10,7 +10,8 @@ from ..reg import PlateReader, BioformatsReader
 from ..filepattern import FilePatternReader
 from ..fileseries import FileSeriesReader
 from ..zen import ZenReader
-
+from ..utils import marr_hildreth_auto
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 def main(argv=sys.argv):
 
@@ -109,6 +110,12 @@ def main(argv=sys.argv):
         '--plates', default=False, action='store_true',
         help='Enable plate mode for HTS data',
     )
+    
+    parser.add_argument(
+    '--auto-sigma', default=True, action='store_true',
+    help='Automatically find the best filter sigma using Marr-Hildreth detection'
+    )
+    
     parser.add_argument(
         '-q', '--quiet', dest='quiet', default=False,
         action='store_true', help='Suppress progress display',
@@ -203,6 +210,7 @@ def main(argv=sys.argv):
     aligner_args["alpha"] = args.stitch_alpha
     aligner_args["max_error"] = args.maximum_error
     aligner_args['filter_sigma'] = args.filter_sigma
+    
 
     mosaic_args = {}
     if args.output_channels:
@@ -219,14 +227,14 @@ def main(argv=sys.argv):
             return process_plates(
                 filepaths, output_path, args.filename_format, args.flip_x,
                 args.flip_y, ffp_paths, dfp_paths, args.barrel_correction,
-                aligner_args, mosaic_args, args.pyramid, args.quiet
+                aligner_args, mosaic_args, args.pyramid, args.quiet,args.auto_sigma
             )
         else:
             mosaic_path_format = str(output_path / args.filename_format)
             return process_single(
                 filepaths, mosaic_path_format, args.flip_x, args.flip_y,
                 ffp_paths, dfp_paths, args.barrel_correction, aligner_args,
-                mosaic_args, args.pyramid, args.quiet
+                mosaic_args, args.pyramid, args.quiet, auto_sigma = args.auto_sigma
             )
     except ProcessingError as e:
         print_error(str(e))
@@ -236,7 +244,7 @@ def main(argv=sys.argv):
 def process_single(
     filepaths, output_path_format, flip_x, flip_y, ffp_paths, dfp_paths,
     barrel_correction, aligner_args, mosaic_args, pyramid, quiet,
-    plate_well=None
+    plate_well=None, auto_sigma=True
 ):
 
     mosaic_args = mosaic_args.copy()
@@ -253,6 +261,14 @@ def process_single(
         print('    reading %s' % filepaths[0])
     reader = build_reader(filepaths[0], barrel_correction, plate_well=plate_well)
     process_axis_flip(reader, flip_x, flip_y)
+    if auto_sigma and aligner_args["filter_sigma"] == 0:
+        if not quiet:
+            print("Automatically finding best sigma for filter...")
+        best_sigma = find_best_sigma(reader)
+        aligner_args["filter_sigma"] = best_sigma
+        if not quiet:
+            print(f"Best sigma set to {best_sigma}, to cancel it please set --auto-sigma False")
+
     ea_args = aligner_args.copy()
     for arg in ("alpha", "max_error"):
         aligner_args.pop(arg, None)
@@ -300,7 +316,7 @@ def process_single(
 
 def process_plates(
     filepaths, output_path, filename_format, flip_x, flip_y, ffp_paths,
-    dfp_paths, barrel_correction, aligner_args, mosaic_args, pyramid, quiet
+    dfp_paths, barrel_correction, aligner_args, mosaic_args, pyramid, quiet, auto_sigma
 ):
 
     temp_reader = build_reader(filepaths[0])
@@ -325,7 +341,7 @@ def process_plates(
                 process_single(
                     filepaths, mosaic_path_format, flip_x, flip_y,
                     ffp_paths, dfp_paths, barrel_correction, aligner_args,
-                    mosaic_args, pyramid, quiet, plate_well=(p, w)
+                    mosaic_args, pyramid, quiet, plate_well=(p, w), auto_sigma = auto_sigma
                 )
             else:
                 print("Skipping -- No images found.")
@@ -378,6 +394,58 @@ def build_reader(path, barrel_correction=0, plate_well=None):
     if barrel_correction != 0:
         reader = reg.BarrelCorrectionReader(reader, barrel_correction)
     return reader
+
+
+
+def find_best_sigma(reader, zero_cross_thresh=0.01, scoring_mode='avg_gradient', max_workers=None):
+    """
+    Find the best sigma using Marr-Hildreth auto-detection on tiles
+    from the four corners and center of the image.
+
+    Args:
+        reader: Image reader instance.
+        sigmas: List of sigma values to test.
+        zero_cross_thresh: Threshold for zero-crossing detection.
+        scoring_mode: Scoring mode for Marr-Hildreth edge detection.
+        max_workers: Maximum number of workers for parallel processing (default: None).
+
+    Returns:
+        float: The best sigma value (average of the best sigmas).
+    """
+    metadata = reader.metadata
+    tile_indices = [
+        0,  # Top-left
+        metadata.num_images - 1,  # Bottom-right
+        metadata.num_images // 2,  # Center
+        metadata.num_images // 4,  # Top-right
+        (metadata.num_images) - metadata.num_images // 4,  # Bottom-left
+    ]
+    images = [reader.read(idx, 0) for idx in tile_indices]
+
+    best_sigmas = []
+
+    # Define a helper function to process each image in parallel
+    def process_tile(idx, img):
+        _, sigma = marr_hildreth_auto(
+            img, zero_cross_thresh=zero_cross_thresh, scoring_mode=scoring_mode
+        )
+        return sigma
+
+    # Use ThreadPoolExecutor to process images in parallel
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(process_tile, idx, img): idx for idx, img in zip(tile_indices, images)}
+        
+        # Collect the results as they complete
+        for future in as_completed(futures):
+            best_sigmas.append(future.result())
+
+    # Calculate the average sigma
+    best_sigma = sum(best_sigmas) / len(best_sigmas) if best_sigmas else None
+    
+    # print(f"Auto set sigma to {best_sigma}, to cancel it please set --auto-sigma False")
+    
+    return best_sigma
+
 
 
 def parse_kwargs_string(string):

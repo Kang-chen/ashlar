@@ -51,6 +51,8 @@ UNITS = jnius.autoclass('ome.units.UNITS')
 DebugTools.setRootLevel("ERROR")
 
 
+def reg_version():
+    print("0.0.1a")
 # TODO:
 # - Write tables with summary information about alignments.
 
@@ -974,6 +976,14 @@ class LayerAligner(object):
     def metadata(self):
         return self.reader.metadata
 
+
+    @property
+    def mosaic_shape(self):
+        upper_corners = self.positions + self.metadata.size
+        max_dimensions = upper_corners.max(axis=0)
+        return tuple(map(int, np.ceil(max_dimensions)))
+
+
     def debug(self, t):
         shift, _ = self.register(t)
         its, o1, o2 = self.overlap(t)
@@ -1563,6 +1573,100 @@ def plot_layer_quality(
                 )
             ax.add_patch(arrow)
     ax.axis('off')
+
+
+
+def plot_layer_shifts2(aligner, img=None, bounds=True, im_kwargs=None):
+    """
+    可视化 LayerAligner 的 tile 位置和邻接关系，可选显示 bounding boxes。
+
+    参数:
+    - aligner: LayerAligner 对象。
+    - img: 可选的背景图像。
+    - bounds: 是否显示 tile 的 bounding boxes（默认为 True）。
+    - im_kwargs: 显示背景图像时的额外参数。
+    """
+    if im_kwargs is None:
+        im_kwargs = {}
+    fig = plt.figure()
+    ax = plt.gca()
+
+    # 绘制背景图像（例如拼接后的图像）
+    draw_mosaic_image(ax, aligner, img, **im_kwargs)
+
+    # 获取 tile 的高度和宽度
+    h, w = aligner.metadata.size
+
+    if bounds:
+        # 绘制每个 tile 的 bounding boxes（表示新位置）
+        for xy in np.fliplr(aligner.positions):
+            rect = mpatches.Rectangle(xy, w, h, color='black', fill=False, lw=0.5)
+            ax.add_patch(rect)
+
+    # 绘制邻接关系，仅显示节点（隐藏边）
+    nx.draw(
+        aligner.neighbors_graph, ax=ax, with_labels=True,
+        pos=np.fliplr(aligner.centers), edge_color='none',
+        node_size=100, font_size=6
+    )
+    fig.set_facecolor('black')
+    plt.show()
+
+def plot_layer_scatter2(aligner, annotate=True, highlight_pair=(1, 2)):
+    """
+    绘制图像块对齐误差与平移量的散点图，适用于 LayerAligner。
+
+    参数:
+    - aligner: LayerAligner 对象。
+    - annotate: 是否在散点图上标注每条边的节点信息（默认为 True）。
+    """
+    import seaborn as sns
+    import numpy as np
+    import matplotlib.pyplot as plt
+
+    # X 轴数据：对齐误差
+    xdata = np.clip(aligner.errors, 0, 10)
+    
+    # Y 轴数据：平移距离（shift）
+    ydata = np.clip(
+        [np.linalg.norm(v[0]) for v in aligner.shifts], 0.01, np.inf
+    )
+    
+    # 创建 JointGrid
+    g = sns.JointGrid(x=xdata, y=ydata)
+    
+    # 绘制主图：散点图
+    g.plot_joint(sns.scatterplot, alpha=0.5)
+    
+    # X 轴直方图
+    _, xbins = np.histogram(xdata, bins=40)
+    sns.histplot(
+        xdata, ax=g.ax_marg_x, bins=xbins, kde=False, color='blue', stat="density"
+    )
+    
+    # 添加参考线
+    # g.ax_joint.axvline(aligner.max_shift, c='k', ls=':', label='Max Shift')
+    g.ax_joint.axhline(aligner.max_shift_pixels, c='k', ls=':', label='Max Shift')
+    g.ax_joint.set_yscale('log')  # Y 轴使用对数尺度
+    g.ax_joint.legend()
+    g.set_axis_labels('Alignment Error', 'Shift Distance')
+
+    if highlight_pair in aligner.neighbors_graph.edges:
+        idx = list(aligner.neighbors_graph.edges).index(highlight_pair)
+        x_highlight = xdata[idx]
+        y_highlight = ydata[idx]
+        g.ax_joint.scatter(
+            x_highlight, y_highlight, c='red', s=100, edgecolor='black', label='Highlighted Edge'
+        )
+        g.ax_joint.legend()
+    
+    # 可选：标注每条边的信息
+    if annotate:
+        for pair, x, y in zip(aligner.neighbors_graph.edges, xdata, ydata):
+            g.ax_joint.annotate(str(pair), (x, y), alpha=0.1)
+    
+    plt.tight_layout()
+    plt.show()
 
 
 def draw_mosaic_image(ax, aligner, img, **kwargs):

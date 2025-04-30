@@ -5,7 +5,8 @@ import skimage
 import skimage.restoration.uft
 import scipy.ndimage
 import numpy as np
-
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from typing import List, Tuple, Optional
 
 # Pre-calculate the Laplacian operator kernel. We'll always be using 2D images.
 _laplace_kernel = skimage.restoration.uft.laplacian(2, (3, 3))[1]
@@ -260,3 +261,152 @@ def imsave(fname, arr, **kwargs):
     del kwargs["check_contrast"]
     import skimage.external.tifffile
     skimage.external.tifffile.imsave(fname, arr, **kwargs)
+
+
+def marr_hildreth_single(img: np.ndarray, sigma: float, zero_cross_thresh: float = 0.0) -> np.ndarray:
+    """
+    Marr-Hildreth (LoG + Zero-Crossing) single-scale edge detection.
+    
+    Args:
+        img:               Input grayscale image, type can be float32/float64, etc.
+        sigma:             Gaussian smoothing standard deviation.
+        zero_cross_thresh: Zero-crossing threshold to filter out small sign changes.
+        
+    Returns:
+        edges: Binary edge image (uint8), 0 represents non-edge, 255 represents edge.
+    """
+    # 1. Gaussian smoothing
+    smoothed = scipy.ndimage.gaussian_filter(img, sigma=sigma)
+    
+    # 2. Compute Laplacian
+    lap_img = scipy.ndimage.laplace(smoothed)
+    # Alternatively: lap_img = ndimage.gaussian_laplace(img, sigma)
+    
+    # 3. Zero-crossing detection
+    edges = np.zeros_like(lap_img, dtype=np.uint8)
+    rows, cols = lap_img.shape
+    
+    for r in range(1, rows-1):
+        for c in range(1, cols-1):
+            val = lap_img[r, c]
+            # 8-neighborhood
+            neighborhood = lap_img[r-1:r+2, c-1:c+2].flatten()
+            
+            # If val > 0 and there exists a value < 0 in the neighborhood (or vice versa),
+            # it may produce a zero-crossing. Additionally, the absolute difference should
+            # be greater than the zero-crossing threshold.
+            if val > 0:
+                negs = neighborhood[neighborhood < 0]
+                if len(negs) > 0:
+                    if np.any(np.abs(val - negs) > zero_cross_thresh):
+                        edges[r, c] = 255
+            elif val < 0:
+                poss = neighborhood[neighborhood > 0]
+                if len(poss) > 0:
+                    if np.any(np.abs(val - poss) > zero_cross_thresh):
+                        edges[r, c] = 255
+            # For val == 0, simplified handling without additional checks
+    
+    return edges
+
+def scoring_edge_count(edges: np.ndarray) -> float:
+    """
+    Simple scoring function: returns the number of edge pixels (higher is better).
+    If you prefer fewer but precise edges, you can modify it to return 1 / edge_count.
+    """
+    return (edges > 0).sum()
+
+def scoring_average_gradient(img: np.ndarray, edges: np.ndarray) -> float:
+    """
+    Computes the mean gradient at edge locations in the original image. Higher gradients indicate stronger edges.
+    Here, we simply use the Sobel gradient to measure this.
+    """
+    sobel_x = scipy.ndimage.sobel(img, axis=1)
+    sobel_y = scipy.ndimage.sobel(img, axis=0)
+    gradient_mag = np.hypot(sobel_x, sobel_y)
+    
+    # Only consider pixels where edges == 255
+    if (edges > 0).sum() == 0:
+        return 0.0
+    return float(gradient_mag[edges == 255].mean())
+
+def process_sigma(args: Tuple[np.ndarray, float, float, str]) -> Tuple[np.ndarray, float, float, float]:
+    """
+    Helper function to process a single sigma value. Intended for parallel execution.
+    
+    Args:
+        args: A tuple containing (img, sigma, zero_cross_thresh, scoring_mode)
+        
+    Returns:
+        A tuple of (edges, sigma, score, best_score)
+    """
+    img, sigma, zero_cross_thresh, scoring_mode = args
+    edges = marr_hildreth_single(img, sigma=sigma, zero_cross_thresh=zero_cross_thresh)
+    
+    # Calculate score based on the selected scoring mode
+    if scoring_mode == 'edge_count':
+        score = scoring_edge_count(edges)
+    elif scoring_mode == 'avg_gradient':
+        score = scoring_average_gradient(img, edges)
+    else:
+        raise ValueError("scoring_mode not supported. Choose from ['edge_count','avg_gradient']")
+    
+    return edges, sigma, score
+
+def marr_hildreth_auto(
+    img: np.ndarray,
+    zero_cross_thresh: float = 0.01,
+    scoring_mode: str = 'avg_gradient',
+    max_workers: Optional[int] = None,
+    alpha: float = 1.0,  # Scoring weight for 'score'
+    beta: float = 0.1   # Scoring weight for 'sigma'
+) -> Tuple[np.ndarray, float]:
+    """
+    Multi-scale Marr-Hildreth edge detection without the need to externally specify a single sigma.
+    Searches for the optimal result within a given set of sigmas and returns it, weighted by score and sigma.
+
+    Args:
+        img:                Grayscale image.
+        zero_cross_thresh:  Zero-crossing threshold.
+        scoring_mode:       Scoring method, options are ['edge_count', 'avg_gradient'].
+        max_workers:        The maximum number of processes to use. Defaults to the number of processors on the machine.
+        alpha:              Weight for the score in the final decision.
+        beta:               Weight for the sigma value in the final decision.
+
+    Returns:
+        best_edges: Binary edge image (uint8).
+        best_sigma: The optimal sigma selected from the provided sigmas.
+    """
+    # Generate sigmas from 0 to 20, step size 2
+    sigmas = list(np.arange(0, 22, 2))  # Creates [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20]
+
+    # Convert to float to prevent overflow when some filtering functions handle uint8
+    if img.dtype not in [np.float32, np.float64]:
+        img = img.astype(np.float32)
+    
+    best_score = -np.inf
+    best_edges = None
+    best_sigma = None
+
+    # Prepare arguments for parallel processing
+    args_list = [(img, s, zero_cross_thresh, scoring_mode) for s in sigmas]
+    
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all tasks
+        futures = {executor.submit(process_sigma, args): args[1] for args in args_list}
+        
+        for future in as_completed(futures):
+            edges, sigma, score = future.result()
+            # print(f"Sigma = {sigma}, Score = {score}")
+
+            # Calculate the weighted score based on both score and sigma
+
+            # Update the best score and sigma based on the weighted score
+            if score > best_score:
+                best_score = score
+                best_sigma = sigma
+                best_edges = edges
+    
+    # print(f"Best Sigma = {best_sigma}, Weighted Score = {best_score}")
+    return best_edges, best_sigma
+
