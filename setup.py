@@ -38,10 +38,10 @@ most common use cases as well as an API for building more specialized tools.
    tissue samples. See https://doi.org/10.1101/151738 for details.
 
 '''
-AUTHOR = 'Jeremy Muhlich'
-AUTHOR_EMAIL = 'jeremy_muhlich@hms.harvard.edu'
+AUTHOR = 'Kang Chen'
+AUTHOR_EMAIL = 'kangchen@cartabio.ai'
 LICENSE = 'MIT License'
-HOMEPAGE = 'https://github.com/sorgerlab/ashlar'
+HOMEPAGE = 'https://github.com/Kang-chen/ashlar'
 
 BIOFORMATS_JAR_URL = 'https://downloads.openmicroscopy.org/bio-formats/8.0.1/artifacts/bioformats_package.jar'
 BIOFORMATS_JAR_SHA256 = '8c7557a9357a83bf40272292fbd676beb466a9a8bab34126e92a49d636c64bc2'
