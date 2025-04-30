@@ -20,7 +20,7 @@ images.
 ashlar [-h] [-o PATH] [-c CHANNEL] [--flip-x] [--flip-y]
        [--flip-mosaic-x] [--flip-mosaic-y]
        [--output-channels CHANNEL [CHANNEL ...]] [-m SHIFT]
-       [--stitch-alpha ALPHA] [--filter-sigma SIGMA]
+       [--stitch-alpha ALPHA] [--filter-sigma SIGMA] [--auto-sigma]
        [--tile-size PIXELS] [--ffp FILE [FILE ...]]
        [--dfp FILE [FILE ...]] [--plates] [-q] [--version]
        FILE [FILE ...]
@@ -72,6 +72,7 @@ optional arguments:
                         cycles or one file for every cycle. Channel counts
                         must match input files. (default: no dark field
                         correction)
+  --auto-sigma          Automatically find the best filter sigma using Marr-Hildreth detection
   --plates              Enable plate mode for HTS data
   -q, --quiet           Suppress progress display
   --version             Show program's version number and exit
